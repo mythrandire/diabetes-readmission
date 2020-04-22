@@ -1,0 +1,419 @@
+---
+title: "E6690_Fall_2019_Project_dso2119_diabetes"
+author: "Dwiref Oza"
+date: "12/18/2019"
+output:
+  word_document: default
+  pdf_document: default
+documentclass: article
+classoption: a4paper
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+## Introduction
+
+As per the 2014 National DM Statistics Report by the Centers for Disease Control and Prevention, an estimated 9.3% of the US population is affected by diabetes mellitus, 28% of which remains undiagnosed. The average rate of readmission for a hospital patient hovers between 8.5% to 13.5%, while for diabetes patients this figure is worryingly much higher. Thirty-day readmission for diabetes patients has been charted to lie between 14.4% and 22.7%. A study by Strack et. al investigated the impact of HbA1c measurement on readmission rates by analyzing a databse of 70,000 patient records. 
+
+## Dataset and Paper
+The data used in the study was submitted to the UC Irvine Machine Learning Repository by the authors on behalf of the Center for Clinical and Translational Research at Virginia Commonwealth University. The dataset has records of 10 years worth of in-atient, out-patient and emergency patient data from 1999 - 2008. Each entry has 50 features, ranging from hormone levels to biological indicators relevant to diabetes mellitus, along with descriptors such as patient age, race, gender, age, duration of hospital care, specialty of the attending physician, etc. All features are relevant to predicting the rate of readmission, however the raw data has gaps in some of these fields, which reduces the possible tenable predictors available. One of the key columns in the data which was the primary thrust of the study, is the testing of the HbA1c blood sugar levels. For a readmission prediction task, there are 3 possible outcomes:
+
+  1. No readmission
+  2. Readmission in less than 30 days
+  3. Readmission post a 30 day period
+
+```{r}
+library(dplyr)
+library(GGally)
+library(ggplot2)
+library(corrplot)
+library(psych)
+library(caret)
+library(rpart)
+library(randomForest)
+library(nnet)
+library(e1071)
+library(ROCR)
+library(CORElearn)
+library(lasso2)
+```
+
+```{r}
+# read in data
+filename <- 'diabetic_data.csv'
+data <- read.table(filename, sep = ",", header = T, na.strings = "?")
+head(data)
+
+#load(file = "data2.rdata")
+```
+
+## Data Cleanup
+No prediction task is complete without pruning the data so that it can be orderd and meaningful. Numerical data must be uniform, and if any columns are categorical, any and all values equivalent to missing, other or NA must be dealt with. Some rows of the dataset have NA values. Columns where a majority of such entries exist are best ignored since they cannot be representative of every patient. Columns 25 to 41 and 43 - 47 are thus discarded. Further, the encouter ID and payer code are discarded as well. 
+
+
+```{r}
+# PREPROCESSING, CLEANING
+
+data <- select(data, -encounter_id, -patient_nbr, -weight,-(25:41),-(43:47))
+```
+
+
+```{r}
+# exploratory analysis and plots
+summary(data)
+# time-in-hospital is positively correlated with number of lab procedures,
+# number of non-lab procedures, number of medications and number of diagnoses
+# number of emergency visits correlates with number of inpatient visits
+
+# fix some missing values
+data$race[is.na(data$race)] <- "Other"
+any(is.na(data$race)) # false
+```
+## Categorizing ICD-9 codes
+
+In the UCI dataset, columns 20, 21 and 22 signify diagnoses for patient visits. The values of these columns are the International Classification of Diseases (ICD-9) medical codes. The range of these values is from 001 to 999, which are too numermous and only serve to thin out the density of data. It would be much more useful to condense these codes into categorical variables that define the broad area of the diagnosis instead of the actual diagnosis itself. Thus, these can be reduced to the labels:
+1. Circulatory
+2. Respiratory
+3. Digestive
+4. Diabetes
+5. Injury
+6. Muscoskeletal
+7. Genitourinary
+8. Neoplasms
+9. Other
+
+Below is the code to achieve this. 
+
+```{r}
+# FEATURE EXTRACTION
+
+data2 <- data
+
+data2$diag_1 <- as.numeric(levels(data2$diag_1)[data2$diag_1])
+data2$diag_2 <- as.numeric(levels(data2$diag_2)[data2$diag_2])
+data2$diag_3 <- as.numeric(levels(data2$diag_3)[data2$diag_3])
+
+# diagnosis1
+data2$diagnosis_group <- factor( rep("other",nrow(data2)),ordered = F, 
+                                 levels = c("circulatory","respiratory","Digestive","Diabetes","Injury",
+                                            "Musculoskeletal","Genitourinary","Neoplasms","other"))
+data2$diagnosis_group[data2$diag_1>=390 & data2$diag_1 <= 459 | data2$diag_1==785] <- "circulatory"
+data2$diagnosis_group[data2$diag_1>=460 & data2$diag_1 <= 519 | data2$diag_1==786] <- "respiratory"
+data2$diagnosis_group[data2$diag_1>=520 & data2$diag_1 <= 579 | data2$diag_1==787] <- "Digestive"
+data2$diagnosis_group[data2$diag_1>=250 & data2$diag_1 < 251] <- "Diabetes"
+data2$diagnosis_group[data2$diag_1>800 & data2$diag_1 <= 999] <- "Injury"
+data2$diagnosis_group[data2$diag_1>=710 & data2$diag_1 <= 739] <- "Musculoskeletal"
+data2$diagnosis_group[data2$diag_1>=580 & data2$diag_1 <= 629 | data2$diag_1==788] <- "Genitourinary"
+data2$diagnosis_group[data2$diag_1>=140 & data2$diag_1 <= 239 | data2$diag_1>=790 & 
+                        data2$diag_1 <= 799 | data2$diag_1==780 | data2$diag_1>=240 & data2$diag_1 < 250 |
+                        data2$diag_1>=251 & data2$diag_1 <= 279 | data2$diag_1>=680 & data2$diag_1 <= 709 |
+                        data2$diag_1>=001 & data2$diag_1 <= 139 | data2$diag_1==781 |
+                      data2$diag_1==782 | data2$diag_1==784] <- "Neoplasms"
+
+# diagnosis_2
+data2$diagnosis_2 <- factor( rep("other",nrow(data2)),ordered = F, 
+                                 levels = c("circulatory","respiratory","Digestive","Diabetes","Injury",
+                                            "Musculoskeletal","Genitourinary","Neoplasms","other"))
+data2$diagnosis_2[data2$diag_2>=390 & data2$diag_2 <= 459 | data2$diag_2==785] <- "circulatory"
+data2$diagnosis_2[data2$diag_2>=460 & data2$diag_2 <= 519 | data2$diag_2==786] <- "respiratory"
+data2$diagnosis_2[data2$diag_2>=520 & data2$diag_2 <= 579 | data2$diag_2==787] <- "Digestive"
+data2$diagnosis_2[data2$diag_2>=250 & data2$diag_2 < 251] <- "Diabetes"
+data2$diagnosis_2[data2$diag_2>800 & data2$diag_2 <= 999] <- "Injury"
+data2$diagnosis_2[data2$diag_2>=710 & data2$diag_2 <= 739] <- "Musculoskeletal"
+data2$diagnosis_2[data2$diag_2>=580 & data2$diag_2 <= 629 | data2$diag_2==788] <- "Genitourinary"
+data2$diagnosis_2[data2$diag_2>=140 & data2$diag_2 <= 239 | data2$diag_2>=790 & 
+                        data2$diag_2 <= 799 | data2$diag_2==780 | data2$diag_2>=240 & data2$diag_2 < 250 |
+                        data2$diag_2>=251 & data2$diag_2 <= 279 | data2$diag_2>=680 & data2$diag_2 <= 709 |
+                        data2$diag_2>=001 & data2$diag_2 <= 139 | data2$diag_2==781 |
+                        data2$diag_2==782 | data2$diag_2==784] <- "Neoplasms"
+
+# diagnosis_3
+data2$diagnosis_3 <- factor( rep("other",nrow(data2)),ordered = F, 
+                                 levels = c("circulatory","respiratory","Digestive","Diabetes","Injury",
+                                            "Musculoskeletal","Genitourinary","Neoplasms","other"))
+data2$diagnosis_3[data2$diag_3>=390 & data2$diag_3 <= 459 | data2$diag_3==785] <- "circulatory"
+data2$diagnosis_3[data2$diag_3>=460 & data2$diag_3 <= 519 | data2$diag_3==786] <- "respiratory"
+data2$diagnosis_3[data2$diag_3>=520 & data2$diag_3 <= 579 | data2$diag_3==787] <- "Digestive"
+data2$diagnosis_3[data2$diag_3>=250 & data2$diag_3 < 251] <- "Diabetes"
+data2$diagnosis_3[data2$diag_3>800 & data2$diag_3 <= 999] <- "Injury"
+data2$diagnosis_3[data2$diag_3>=710 & data2$diag_3 <= 739] <- "Musculoskeletal"
+data2$diagnosis_3[data2$diag_3>=580 & data2$diag_3 <= 629 | data2$diag_3==788] <- "Genitourinary"
+data2$diagnosis_3[data2$diag_3>=140 & data2$diag_3 <= 239 | data2$diag_3>=790 & 
+                        data2$diag_3 <= 799 | data2$diag_3==780 | data2$diag_3>=240 & data2$diag_3 < 250 |
+                        data2$diag_3>=251 & data2$diag_3 <= 279 | data2$diag_3>=680 & data2$diag_3 <= 709 |
+                        data2$diag_3>=001 & data2$diag_3 <= 139 | data2$diag_3==781 |
+                        data2$diag_3==782 | data2$diag_3==784] <- "Neoplasms"
+# admission_source
+data2$admission_source <- factor( rep("other",nrow(data2)),ordered = F, 
+                             levels = c("clinic_referral", "emergency","other"))
+data2$admission_source[data2$admission_source_id==c(1,2,3)]<- "clinic_referral"
+data2$admission_source[data2$admission_source_id==7]<- "emergency"
+
+# discharged_to
+data2$discharged_to <- factor( rep("transferred",nrow(data2)),ordered = F, 
+                                  levels = c("home", "transferred","left_AMA"))
+data2$discharged_to[data2$discharge_disposition_id==c(1,6,8)]<- "home"
+data2$discharged_to[data2$discharge_disposition_id==7]<- "left_AMA"
+
+data2 <- select(data2, -diag_1, -diag_2, -diag_3, -admission_type_id, -discharge_disposition_id)
+data2 <- select(data2, -medical_specialty)
+data2 <- rename(data2, diag1 = diagnosis_group, diag2=diagnosis_2, diag3 = diagnosis_3)
+
+# payer_code
+data2$payer_code2 <- factor( rep("other",nrow(data2)),ordered = F, 
+                               levels = c("other", "self_pay"))
+data2$payer_code2[data2$payer_code=="SP"]<- "self_pay"
+data2 <- select(data2, -payer_code)
+data2 <- select(data2, -admission_source_id)
+data2 <- rename(data2, payer_code=payer_code2)
+```
+## Data Visualization
+
+To start with, here are the patient distributions by race, age, gender and their readmissions (or lack thereof).
+
+
+```{r}
+# variable distributions
+plot(data$age, main = "Age distribution") 
+plot(data$gender, main = "Gender distribution") 
+plot(data$A1Cresult, main = "HbA1c") 
+plot(data$readmitted, main = "Readmissions") 
+plot(data2$admission_source, main = "Source of admission") 
+plot(data2$discharged_to, main = "Readmissions") 
+
+g <- ggplot(data2, aes(x=age, y=time_in_hospital))
+g + geom_boxplot(aes(fill=readmitted))
+
+g <- ggplot(data2,aes(x=A1Cresult, y=num_medications))
+g + geom_boxplot(aes(color=A1Cresult)) 
+
+g <- ggplot(data2,aes(x=A1Cresult, y=time_in_hospital))
+g + geom_boxplot(aes(fill=diabetesMed)) + facet_grid(. ~ readmitted)
+
+g <- ggplot(data2,aes(x=age, y=num_medications))
+g + geom_boxplot(aes(fill=age))
+
+g <- ggplot(data2,aes(x=diag2, y=time_in_hospital))
+g + geom_boxplot(aes(fill=diag2))
+```
+\textbf{Age:} Mode is 70-80yrs normal distribution, right skewed.
+
+\textbf{Gender:} 53% of the patients were female, while 47% were males.
+
+\textbf{HbA1c:}84% of the patients had no A1c results.
+
+\textbf{Readmission:} More than 50% patients werer not readmitted.
+
+\textbf{Source of admission:} Emergency 60%.
+
+\textbf{Transfers:} 70% of patients were transferred to another facility.
+
+75% of patients were Caucasian, while the mode of stay in hospital was 3 days. Patients with readmission inside of 30 days were in their 70s-80s and had longer stints at the hospital. Patients in their 30s-40s readmitted within 30 days spent longer time in the hospital as well. Patients with no readmission had generally spent less time in hospital, which is self-explanatory. The number of medications being taken by patients was highest in 60-70yr olds. Finally, patients with either respiratory and/or injury diagnoses stayed for longer in the hospital. 
+
+
+## Principal Component Analysis for Potential Predictors
+
+Even after data pre-processing, there remain over 20 columns of data for what is can be modeled through multivariate logistic regression, as is the case in the study by Strack et. al, or through a support vector machine (SVM) or R-part decision tree, or even Random Forests. Prior to deploying these models to predict patient readmission, it would be beneficial to identify which features contribute to the pricipal components. 
+
+```{r}
+# QUICK PCA with numeric variables
+
+y <- select(data2, readmitted)
+X <- select(data2, time_in_hospital, num_lab_procedures, num_procedures, num_medications, 
+            number_outpatient, number_emergency, number_inpatient, number_diagnoses)
+
+pca_noRot <- principal(X, nfactors = 5, rotate = "none")
+rotation2_noRot <- data.frame(cbind(pca_noRot$score, y))
+head(rotation2_noRot)
+pca_noRot$loadings
+
+
+# linear model of class as a function of PCs
+linModel_noRot <- glm(readmitted ~ PC1 + PC2 + PC3 + PC4 + PC5, data = rotation2_noRot, family = binomial)
+summary(linModel_noRot)
+# all PCs are significant ***
+
+# PCA with varimax rotation
+pca2 <- principal(X, nfactors = 5, rotate = "varimax") 
+rotation2 <- data.frame(cbind(pca2$score, y))
+pca2$loadings
+
+plot(pca2)
+summary(rotation2)
+# plot(rotation2)
+# commented plot of rotation as it created a gigantic pdf when knitting. 
+```
+
+With standard principal component analysis, the 5 principal components come out to be the following groups. The first principal component refers to number of medications and time in hospital. PC2 is number of in-patient visits and emergency. PC3 is the number of procedures, PC4 refers to the number of out-patient visits and PC5 signifies the number of diagnoses. 
+
+The varimax roation is applied to the top 5 principal components to maximize the sum of variance. In the above visualizatios, the Rotatoted Componenets are explained as follows. RC1 refers to lab procedures and time in hospital, RC2 signifies emergency visits and status as an in-patient, RC3 refers to number of procedures and medications, while RC4 is outpatient information and finally RC5 is the number of diagnoses.
+
+## Splitting the Data
+
+The processed dataset is split 66 to 37% for training and testing respectively. 
+
+```{r}
+# SPLIT DATA INTO TRAINING AND TESTING SET
+
+set.seed(123)
+inTrain <- createDataPartition(y = data2$readmitted, p = .66,list = FALSE)
+train <- data2[ inTrain,]
+test <- data2[-inTrain,]
+nrow(train) # 67167
+nrow(test) # 3459
+```
+
+## Logistic Regression
+By fitting two linear models with and without the HbA1c test results, a conclusion on the importance of this parameter can be made. For the first trial, a mutlivariate logistic regression has been attempted while excluding the HbA1c test results. The model converges in 8 Fischer iterations. 
+
+```{r}
+
+# LOGISTIC REGRESSION
+
+fit_all <- glm(readmitted ~., data=train, family=binomial)
+summary(fit_all)
+```
+
+```{r}
+# pseudo R-squared for logistic regression model
+logisticPseudoR2s <- function(LogModel) {
+  dev <- LogModel$deviance 
+  nullDev <- LogModel$null.deviance 
+  modelN <-  length(LogModel$fitted.values)
+  R.l <-  1 -  dev / nullDev
+  R.cs <- 1- exp ( -(nullDev - dev) / modelN)
+  R.n <- R.cs / ( 1 - ( exp (-(nullDev / modelN))))
+  cat("Pseudo R^2 for logistic regression\n")
+  cat("Hosmer and Lemeshow R^2  ", round(R.l, 3), "\n")
+  cat("Cox and Snell R^2        ", round(R.cs, 3), "\n")
+  cat("Nagelkerke R^2           ", round(R.n, 3),    "\n")
+}
+
+logisticPseudoR2s(fit_all)
+
+```
+
+Clearly, this model performs rather poorly.
+
+For the second logistic model, the HbA1c results are included as a predictor. The adjusted R-squared and Chi-squared test reveals that this model performs very similarly to the standard model in the previous code chunk. 
+
+```{r}
+library(pscl)
+
+# main effects, with A1C result
+fit_a1c <- glm(readmitted ~ race+age+discharged_to+time_in_hospital+
+             num_lab_procedures+num_procedures+num_medications+number_outpatient+
+             number_emergency+number_inpatient+number_diagnoses+
+             insulin+change+diabetesMed+diag1+diag2+diag3+A1Cresult, 
+           data=train, family = binomial)
+summary(fit_a1c)
+# results not very different from fit_all
+logisticPseudoR2s(fit_a1c)
+pR2(fit_a1c)
+# adjusted R-squared mostly same as fit_all
+anova(fit_a1c, test="Chisq")
+
+
+
+```
+## Decision Tree
+
+For the third test, a decision tree is attempted. The breakdown of variable importance belies the skewness of the dataset, which is bound to cripple the performance of the decision tree. As a result, while the tree predicts no readmission with almost 92% accuracy, the model's sensitivity to predicting readmission within or after 30 days is abysmal. 
+
+```{r}
+# RPART DECISION TREES
+
+rpart_tree <- rpart(formula = readmitted ~ age+discharged_to+time_in_hospital+
+                      num_lab_procedures+num_procedures+num_medications+number_outpatient+
+                      number_emergency+number_inpatient+number_diagnoses+
+                      insulin+change+diabetesMed+diag1+diag2+diag3+A1Cresult, 
+                    data=train, method = 'class')
+summary(rpart_tree)
+
+test$pred_readmit <- predict(rpart_tree, test, type="class")
+table(predict(rpart_tree, test, type="class"), test$readmitted)
+prop.table(table(test$readmitted, test$pred_readmit),1)
+
+
+
+confusionMatrix(test$pred_readmit, test$readmitted)
+```
+## Random Forest
+
+For the fourth test, a random forest approach is tested for the readmission dataset. This model does not predict readmission as well as the decision tree in the third test. Here, the prediction of readmission is at an accuracy of 84%, as shown in the confusion matrix. 
+
+
+
+```{r}
+# RANDOM FOREST
+Rf_fit<-randomForest(formula=readmitted ~ age+discharged_to+time_in_hospital+
+                       num_lab_procedures+num_procedures+num_medications+number_outpatient+
+                       number_emergency+number_inpatient+number_diagnoses+
+                       insulin+change+diabetesMed+diag1+diag2+diag3+A1Cresult,
+                     data=train)
+print(Rf_fit)
+
+test$pred_readmit <- predict(Rf_fit, test, type = "response")
+table(test$readmitted, test$pred_readmit)
+prop.table(table(test$readmitted, test$pred_readmit),1)
+
+
+importance(Rf_fit)
+
+```
+
+
+## Support Vector Machine
+
+A Support Vector Machine approach is the fourth test in this project. Due to the volume of the dataset, a parallelSVM library function is used instead of the standard SVM function call in R. Any loss or gain in model performance by using the parallel implementation was not tested. The SVM performs particularly poorly compared to the Random Forest and Decision Trees with just 56% accuracy, and takes longer to train, making it the least favorable approach tested. Note that the warnings in the code output for the SVM code chunk are inherent to the parallelSVM library and cannot be avoided. 
+
+```{r}
+# SUPPORT VECTOR MACHINES
+library(parallelSVM)
+SVMmodel <- parallelSVM(readmitted ~ age+discharged_to+time_in_hospital+
+                  num_lab_procedures+num_procedures+num_medications+number_outpatient+
+                  number_emergency+number_inpatient+number_diagnoses+
+                  insulin+change+diabetesMed+diag1+diag2+diag3+A1Cresult,
+                data=train, kernel = "linear")
+                  #kernel = "rbf", gamma = 0.1, cost = 1)
+print(SVMmodel)
+summary(SVMmodel)
+x <- select(test, -readmitted)
+y <- select(test, readmitted)
+pred <- predict(SVMmodel, x)
+test$pred_readmit <- pred
+prop.table(table(test$readmitted, test$pred_readmit),1)
+confusionMatrix(test$pred_readmit, test$readmitted)
+
+```
+## Naive Bayes
+
+As per a study by Caruana and Niculescu-Mizil, Bayes classification has been shown to be outperformed by classifiers such as boosted trees and random forests. The random forest approach has already been attempted, so it would be an interesting experiment to see by what margin the Naive Bayes classifier falls short of the results from the Random Forest classifier. 
+
+```{r}
+# NAIVE BAYES 
+# e1071 implementation
+
+nbayesmodel <- naiveBayes(readmitted ~ age+discharged_to+time_in_hospital+
+                            num_lab_procedures+num_procedures+num_medications+number_outpatient+
+                            number_emergency+number_inpatient+number_diagnoses+
+                            insulin+change+diabetesMed+diag1+diag2+diag3+A1Cresult, 
+                          data = train)
+
+pred <- predict(nbayesmodel, test, type = "class")
+test$pred_readmit <- pred
+prop.table(table(test$readmitted, test$pred_readmit),1)
+confusionMatrix(test$pred_readmit, test$readmitted)
+
+write.csv(data2, file = "processed_data_diabetes.csv", sep=",", na="?", row.names = F)
+```
+It turns out that for the given data, the Bayes Classifier performs measurably better than the Random Forest, although objectively all models tested in this project perform far from satisfactorily. Presumably a neaural network might perform better, but since this project was coded in R, testing this approach was not immediately feasible. 
+
+## Summary and Conclusions
+
+Based on hypothesis testing for the multivariate logstic models, the results of the study by Strack et. al can be corroborated, as the addition of HbA1c test results as a descriptor demostrably improves the result, although not by a large margin. This underwhelming delta is explained by the fact that only 84% of the patients in the entire dataset were tested for A1c and thus making meaningful predictions using it as a descriptor is moot. In the real world, the inclusion of this test result may very well improve readmission prediction, but due to the quality of the dataset, this cannot be verified beyond a doubt. Of the tested models, the Naive Bayes classifier achieved a sensitivity of 94% for predicting no readmission, with an overall accuracy of 56.09%. The Random Forest model managed a sensitivity of 84.25% for no readmission, giving an overall accuracy of 56.9%. The decision tree yielded a 91% sensitivity for no readmission prediction, but on overall accuracy of 56.65%. The SVM had an overall accuracy of 56.61%, managing a no readmission sensitivity of 94.48%. 
+Overall, the Bayes classifier and the SVM perform better than the rest, but declaring that either performed the best is misleading, since the overall performance of all models was extremely poor. In particular, the per-class specificities for all models were below 20%, which for medical prediction tasks is extremely dangerous to rely on. 
+
